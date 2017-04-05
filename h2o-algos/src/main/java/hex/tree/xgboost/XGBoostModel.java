@@ -145,7 +145,10 @@ public class XGBoostModel extends Model<XGBoostModel, XGBoostModel.XGBoostParame
   }
 
   HashMap<String, Object> createParams() {
-    XGBoostParameters p = _parms;
+    return createParams(_parms, _output);
+  }
+
+  static HashMap<String, Object> createParams(XGBoostParameters p, XGBoostOutput output) {
     HashMap<String, Object> params = new HashMap<>();
 
     // Common parameters with H2O GBM
@@ -241,9 +244,9 @@ public class XGBoostModel extends Model<XGBoostModel, XGBoostModel.XGBoostParame
     params.put("lambda", p._reg_lambda);
     params.put("alpha", p._reg_alpha);
 
-    if (_output.nclasses()==2) {
+    if (output.nclasses()==2) {
       params.put("objective", "binary:logistic");
-    } else if (_output.nclasses()==1) {
+    } else if (output.nclasses()==1) {
       if (p._distribution == DistributionFamily.gamma) {
         params.put("objective", "reg:gamma");
       } else if (p._distribution == DistributionFamily.tweedie) {
@@ -258,7 +261,7 @@ public class XGBoostModel extends Model<XGBoostModel, XGBoostModel.XGBoostParame
       }
     } else {
       params.put("objective", "multi:softprob");
-      params.put("num_class", _output.nclasses());
+      params.put("num_class", output.nclasses());
     }
     Log.info("XGBoost Parameters:");
     for (Map.Entry<String,Object> s : params.entrySet()) {
@@ -423,14 +426,25 @@ public class XGBoostModel extends Model<XGBoostModel, XGBoostModel.XGBoostParame
   @Override
   public Frame score(Frame fr, String destination_key, Job j, boolean computeMetrics) throws IllegalArgumentException {
     Frame adaptFr = new Frame(fr);
+
     computeMetrics = computeMetrics && (!isSupervised() || (adaptFr.vec(_output.responseName()) != null && !adaptFr.vec(_output.responseName()).isBad()));
-    String[] msg = adaptTestForTrain(adaptFr,true, computeMetrics);   // Adapt
+    adaptTestForTrain(adaptFr,true, computeMetrics);   // Adapt
+
     try {
-      DMatrix trainMat = convertFrametoDMatrix( model_info()._dataInfoKey, adaptFr,
-          _parms._response_column, _parms._weights_column, _parms._fold_column, null, _output._sparse);
+      DMatrix trainMat = convertFrametoDMatrix(
+              model_info()._dataInfoKey,
+              adaptFr,
+              0,
+              adaptFr.anyVec().nChunks() - 1,
+              _parms._response_column,
+              _parms._weights_column,
+              _parms._fold_column,
+              null,
+              _output._sparse);
       ModelMetrics[] mm = new ModelMetrics[1];
       Frame preds = makePreds(model_info()._booster, trainMat, mm, Key.<Frame>make(destination_key));
       DKV.put(preds);
+      trainMat.dispose();
       return preds;
     } catch (XGBoostError xgBoostError) {
       xgBoostError.printStackTrace();

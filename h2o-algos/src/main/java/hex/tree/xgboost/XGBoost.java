@@ -1,16 +1,10 @@
 package hex.tree.xgboost;
 
-import hex.DataInfo;
-import hex.ModelBuilder;
-import hex.ModelCategory;
-import hex.ScoreKeeper;
+import hex.*;
 import hex.glm.GLMTask;
-import ml.dmlc.xgboost4j.java.Booster;
+import ml.dmlc.xgboost4j.java.*;
 import ml.dmlc.xgboost4j.java.DMatrix;
-import ml.dmlc.xgboost4j.java.XGBoostError;
-import water.H2O;
-import water.Job;
-import water.Key;
+import water.*;
 import water.exceptions.H2OIllegalArgumentException;
 import water.exceptions.H2OModelBuilderIllegalArgumentException;
 import water.fvec.Chunk;
@@ -20,14 +14,7 @@ import water.util.ArrayUtils;
 import water.util.Log;
 import water.util.Timer;
 
-import java.io.FileNotFoundException;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.OutputStream;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.List;
+import java.util.*;
 
 import static hex.tree.SharedTree.createModelSummaryTable;
 import static hex.tree.SharedTree.createScoringHistoryTable;
@@ -57,20 +44,34 @@ public class XGBoost extends ModelBuilder<XGBoostModel,XGBoostModel.XGBoostParam
    * @return DMatrix
    * @throws XGBoostError
    */
-  public static DMatrix convertFrametoDMatrix(Key<DataInfo> dataInfoKey, Frame f, String response, String weight, String fold, String[] featureMap, boolean sparse) throws XGBoostError {
+  public static DMatrix convertFrametoDMatrix(Key<DataInfo> dataInfoKey,
+                                              Frame f,
+                                              int chLo,
+                                              int chHi,
+                                              String response,
+                                              String weight,
+                                              String fold,
+                                              String[] featureMap,
+                                              boolean sparse) throws XGBoostError {
+    // chLo and chHi are assumed to be proper values i.e. assuming that the user calling this method made sure a NPE won't be thrown below
+    long chRowLo = f.anyVec().chunkForChunkIdx(chLo).start();
+    Chunk lastChunk = f.anyVec().chunkForChunkIdx(chHi);
+    long chRowHi = lastChunk.start() + lastChunk._len;
+
+    int nRows = (int) (chRowHi - chRowLo);
 
     DataInfo di = dataInfoKey.get();
     // set the names for the (expanded) columns
-    if (featureMap!=null) {
+    if (featureMap != null) {
       String[] coefnames = di.coefNames();
       StringBuilder sb = new StringBuilder();
-      assert(coefnames.length == di.fullN());
+      assert (coefnames.length == di.fullN());
       for (int i = 0; i < di.fullN(); ++i) {
-        sb.append(i).append(" ").append(coefnames[i].replaceAll("\\s*","")).append(" ");
-        int catCols = di._catOffsets[di._catOffsets.length-1];
-        if (i < catCols || f.vec(i-catCols).isBinary())
+        sb.append(i).append(" ").append(coefnames[i].replaceAll("\\s*", "")).append(" ");
+        int catCols = di._catOffsets[di._catOffsets.length - 1];
+        if (i < catCols || f.vec(i - catCols).isBinary())
           sb.append("i");
-        else if (f.vec(i-catCols).isInt())
+        else if (f.vec(i - catCols).isInt())
           sb.append("int");
         else
           sb.append("q");
@@ -82,7 +83,6 @@ public class XGBoost extends ModelBuilder<XGBoostModel,XGBoostModel.XGBoostParam
     DMatrix trainMat;
     int nz = 0;
     int actualRows = 0;
-    int nRows = (int) f.numRows();
     Vec.Reader w = weight == null ? null : f.vec(weight).new Reader();
     Vec.Reader[] vecs = new Vec.Reader[f.numCols()];
     for (int i = 0; i < vecs.length; ++i) {
@@ -114,22 +114,22 @@ public class XGBoost extends ModelBuilder<XGBoostModel,XGBoostModel.XGBoostParam
 
           List<SparseItem>[] col = new List[nCols]; //TODO: use more efficient storage (no GC)
           // allocate
-          for (int i=0;i<nCols;++i) {
+          for (int i = 0; i < nCols; ++i) {
             col[i] = new ArrayList<>(Math.min(nRows, 10000));
           }
 
           // collect non-zeros
-          int nzCount=0;
-          for (int i=0;i<nCols;++i) { //TODO: parallelize over columns
+          int nzCount = 0;
+          for (int i = 0; i < nCols; ++i) { //TODO: parallelize over columns
             Vec v = f.vec(i);
-            for (int c=0;c<v.nChunks();++c) {
+            for (int c = 0; c < v.nChunks(); ++c) {
               Chunk ck = v.chunkForChunkIdx(c);
               int[] nnz = new int[ck.sparseLenZero()];
               int nnzCount = ck.nonzeros(nnz);
-              for (int k=0;k<nnzCount;++k) {
+              for (int k = 0; k < nnzCount; ++k) {
                 SparseItem item = new SparseItem();
                 int localIdx = nnz[k];
-                item.pos = (int)ck.start() + localIdx;
+                item.pos = (int) ck.start() + localIdx;
                 // both 0 and NA are omitted in the sparse DMatrix
                 if (w != null && w.at(item.pos) == 0) continue;
                 if (ck.isNA(localIdx)) continue;
@@ -143,16 +143,16 @@ public class XGBoost extends ModelBuilder<XGBoostModel,XGBoostModel.XGBoostParam
           float[] data = new float[nzCount];
           int[] rowIndex = new int[nzCount];
           // fill data for DMatrix
-          for (int i=0;i<nCols;++i) { //TODO: parallelize over columns
+          for (int i = 0; i < nCols; ++i) { //TODO: parallelize over columns
             List sparseCol = col[i];
             colHeaders[i] = nz;
-            for (int j=0;j<sparseCol.size();++j) {
-              SparseItem si = (SparseItem)sparseCol.get(j);
+            for (int j = 0; j < sparseCol.size(); ++j) {
+              SparseItem si = (SparseItem) sparseCol.get(j);
               rowIndex[nz] = si.pos;
-              data[nz] = (float)si.val;
-              assert(si.val != 0);
-              assert(!Double.isNaN(si.val));
-              assert(w == null || w.at(si.pos) != 0);
+              data[nz] = (float) si.val;
+              assert (si.val != 0);
+              assert (!Double.isNaN(si.val));
+              assert (w == null || w.at(si.pos) != 0);
               nz++;
             }
           }
@@ -176,7 +176,7 @@ public class XGBoost extends ModelBuilder<XGBoostModel,XGBoostModel.XGBoostParam
 
           // extract predictors
           rowHeaders[0] = 0;
-          for (int i = 0; i < nRows; ++i) {
+          for (long i = chRowLo; i < nRows; ++i) {
             if (w != null && w.at(i) == 0) continue;
             int nzstart = nz;
             // enlarge final data arrays by 2x if needed
@@ -231,7 +231,7 @@ public class XGBoost extends ModelBuilder<XGBoostModel,XGBoostModel.XGBoostParam
         float[] data = new float[1 << 20];
         int cols = di.fullN();
         int pos = 0;
-        for (int i = 0; i < nRows; ++i) {
+        for (long i = chRowLo; i < nRows; ++i) {
           if (w != null && w.at(i) == 0) continue;
           // enlarge final data arrays by 2x if needed
           while (data.length < (actualRows + 1) * cols) {
@@ -271,7 +271,7 @@ public class XGBoost extends ModelBuilder<XGBoostModel,XGBoostModel.XGBoostParam
     float[] weights = new float[actualRows];
     if (w != null) {
       int j = 0;
-      for (int i = 0; i < nRows; ++i) {
+      for (long i = chRowLo; i < nRows; ++i) {
         if (w.at(i) == 0) continue;
         weights[j++] = (float) w.at(i);
       }
@@ -282,7 +282,7 @@ public class XGBoost extends ModelBuilder<XGBoostModel,XGBoostModel.XGBoostParam
     Vec.Reader respVec = f.vec(response).new Reader();
     float[] resp = new float[actualRows];
     int j = 0;
-    for (int i = 0; i < nRows; ++i) {
+    for (long i = chRowLo; i < nRows; ++i) {
       if (w != null && w.at(i) == 0) continue;
       resp[j++] = (float) respVec.at(i);
     }
@@ -291,7 +291,7 @@ public class XGBoost extends ModelBuilder<XGBoostModel,XGBoostModel.XGBoostParam
     weights = Arrays.copyOf(weights, actualRows);
 
     trainMat.setLabel(resp);
-    if (w!=null)
+    if (w != null)
       trainMat.setWeight(weights);
 //    trainMat.setGroup(null); //fold //FIXME - only needed if CV is internally done in XGBoost
     return trainMat;
@@ -361,9 +361,6 @@ public class XGBoost extends ModelBuilder<XGBoostModel,XGBoostModel.XGBoostParam
       }
     }
 
-    if (H2O.CLOUD.size()>1) {
-      throw new IllegalArgumentException("XGBoost is currently only supported in single-node mode.");
-    }
     if ( _parms._backend == XGBoostModel.XGBoostParameters.Backend.gpu && !hasGPU()) {
       error("_backend", "GPU backend is not functional. Check CUDA_PATH and/or GPU installation.");
     }
@@ -449,6 +446,7 @@ public class XGBoost extends ModelBuilder<XGBoostModel,XGBoostModel.XGBoostParam
 
   // ----------------------
   private class XGBoostDriver extends Driver {
+
     @Override
     public void computeImpl() {
       init(true); //this can change the seed if it was set to -1
@@ -488,65 +486,100 @@ public class XGBoost extends ModelBuilder<XGBoostModel,XGBoostModel.XGBoostParam
       }
 
       try {
-        DMatrix trainMat = convertFrametoDMatrix( model.model_info()._dataInfoKey, _train,
-            _parms._response_column, _parms._weights_column, _parms._fold_column, featureMap, model._output._sparse);
+        // Prepare Rabit
+        RabitTracker rt = new RabitTracker(H2O.getCloudSize());
+        rt.start(0); // Make this settable?
 
-        DMatrix validMat = _valid != null ? convertFrametoDMatrix(model.model_info()._dataInfoKey, _valid,
-            _parms._response_column, _parms._weights_column, _parms._fold_column, featureMap, model._output._sparse) : null;
+        model.model_info()._booster = new XGBoostTrainingTask(
+                model.model_info(),
+                featureMap,
+                model._output,
+                rt.getWorkerEnvs(),
+                _parms).doAll(_train).booster();
 
-        // For feature importances - write out column info
-        OutputStream os;
-        try {
-          os = new FileOutputStream("/tmp/featureMap.txt");
-          os.write(featureMap[0].getBytes());
-          os.close();
-        } catch (FileNotFoundException e) {
-          e.printStackTrace();
-        } catch (IOException e) {
-          e.printStackTrace();
+        rt.waitFor(0);
+
+        DMatrix trainMat = convertFrametoDMatrix(
+                model.model_info()._dataInfoKey,
+                _train,
+                0,
+                _train.anyVec().nChunks() - 1,
+                _parms._response_column,
+                _parms._weights_column,
+                _parms._fold_column,
+                featureMap,
+                model._output._sparse);
+
+        DMatrix validMat = null;
+        if(null != _valid) {
+            validMat = convertFrametoDMatrix(
+                    model.model_info()._dataInfoKey,
+                    _valid,
+                    0,
+                    _valid.anyVec().nChunks() - 1,
+                    _parms._response_column,
+                    _parms._weights_column,
+                    _parms._fold_column,
+                    featureMap,
+                    model._output._sparse);
         }
 
-        HashMap<String, DMatrix> watches = new HashMap<>();
-        if (validMat!=null)
-          watches.put("valid", validMat);
-        else
-          watches.put("train", trainMat);
-
-        // create the backend
-        model.model_info()._booster = ml.dmlc.xgboost4j.java.XGBoost.train(trainMat, model.createParams(), 0, watches, null, null);
-
         // train the model
-        scoreAndBuildTrees(model, trainMat, validMat);
+        scoreAndBuildTrees(model, trainMat, validMat, featureMap, rt);
+
+        Map<String, String> rabitEnv = new HashMap<>();
+        rabitEnv.put("XGBOOST_TASK_ID", Thread.currentThread().getName());
+        Rabit.init(rabitEnv);
 
         // final scoring
         doScoring(model, model.model_info()._booster, trainMat, validMat, true);
+
+        Rabit.shutdown();
+        trainMat.dispose();
+        if(null != validMat) {
+          validMat.dispose();
+        }
 
         // save the model to DKV
         model.model_info().nativeToJava();
       } catch (XGBoostError xgBoostError) {
         xgBoostError.printStackTrace();
       }
+
       model._output._boosterBytes = model.model_info()._boosterBytes;
       model.unlock(_job);
     }
 
-    protected final void scoreAndBuildTrees(XGBoostModel model, DMatrix trainMat, DMatrix validMat) throws XGBoostError {
+    protected final void scoreAndBuildTrees(XGBoostModel model, DMatrix trainMat, DMatrix validMat, String[] featureMap, RabitTracker rt) throws XGBoostError {
+      // During first iteration model contains 0 trees, then 1-tree, ...
+      Map<String, String> rabitEnv = new HashMap<>();
+      rabitEnv.put("XGBOOST_TASK_ID", Thread.currentThread().getName());
+
       for( int tid=0; tid< _parms._ntrees; tid++) {
-        // During first iteration model contains 0 trees, then 1-tree, ...
+        Rabit.init(rabitEnv);
         boolean scored = doScoring(model, model.model_info()._booster, trainMat, validMat, false);
         if (scored && ScoreKeeper.stopEarly(model._output.scoreKeepers(), _parms._stopping_rounds, _nclass > 1, _parms._stopping_metric, _parms._stopping_tolerance, "model's last", true)) {
           doScoring(model, model.model_info()._booster, trainMat, validMat, true);
           _job.update(_parms._ntrees-model._output._ntrees); //finish
           return;
         }
+        Rabit.shutdown();
 
         Timer kb_timer = new Timer();
-        try {
-//          model.model_info()._booster.setParam("eta", effective_learning_rate(model));
-          model.model_info()._booster.update(trainMat, tid);
-        } catch (XGBoostError xgBoostError) {
-          xgBoostError.printStackTrace();
-        }
+
+        rt.start(0);
+        model.model_info()._booster = new XGBoostUpdateTask(
+                model.model_info()._booster,
+                model.model_info(),
+                featureMap,
+                model._output,
+                _parms,
+                tid,
+                rt.getWorkerEnvs()).doAll(_train).booster();
+        rt.waitFor(0);
+
+        Rabit.init(rabitEnv);
+
         Log.info((tid + 1) + ". tree was built in " + kb_timer.toString());
         _job.update(1);
         // Optional: for convenience
@@ -558,12 +591,17 @@ public class XGBoost extends ModelBuilder<XGBoostModel,XGBoostModel.XGBoostParam
         model._output._training_time_ms = ArrayUtils.copyAndFillOf(model._output._training_time_ms, model._output._ntrees+1, System.currentTimeMillis());
         if (stop_requested() && !timeout()) throw new Job.JobCancelledException();
         if (timeout()) { //stop after scoring
-          if (!scored) doScoring(model, model.model_info()._booster, trainMat, validMat, true);
+          if (!scored) {
+            doScoring(model, model.model_info()._booster, trainMat, validMat, true);
+          }
           _job.update(_parms._ntrees-model._output._ntrees); //finish
           break;
         }
+        Rabit.shutdown();
       }
+      Rabit.init(rabitEnv);
       doScoring(model, model.model_info()._booster, trainMat, validMat, true);
+      Rabit.shutdown();
     }
 
     long _firstScore = 0;
@@ -644,4 +682,5 @@ public class XGBoost extends ModelBuilder<XGBoostModel,XGBoostModel.XGBoostParam
     }
     return count;
   }
+
 }
